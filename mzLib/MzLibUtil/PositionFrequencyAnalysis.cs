@@ -166,10 +166,10 @@ namespace MzLibUtil
             
                             // Go through the modifications found at a modified amino acid index
                             foreach (var mod in modpos.Value)
-                            {
+    {
                                 //If the name of that modification has not been seen, record that modification in the index's dictionary with an intensity of 0
                                 if (!modifiedPosition.ContainsKey(mod))
-            {
+        {
                                     modifiedPosition[mod] = new UtilModification(mod, modpos.Key, 0);
                                 }
                                 // Increase the intensity of the modification by the intensity of the peptide
@@ -182,7 +182,7 @@ namespace MzLibUtil
             Occupancy = proteinGroups;
             OccupancyLevel = "peptide";
         }
-
+            
         public void PeptideToProteinPTMOccupancy(Dictionary<string, string> proteinSequences) // combine this to previous method.
         {
             foreach (var pg in Occupancy.Keys) 
@@ -192,7 +192,7 @@ namespace MzLibUtil
                 {
                     UtilProtein protein = proteinGroup.Proteins[prot];
                     foreach (var pep in protein.Peptides.Keys)
-                    {
+            {
                         UtilPeptide peptide = protein.Peptides[pep];
                         peptide.ParentProtein = protein;
                         peptide.PeptideToProteinPositions();
