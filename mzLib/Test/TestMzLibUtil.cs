@@ -148,14 +148,14 @@ namespace Test
             pgs.Add("pg1");
             pgs.Add("pg2|pg3");
 
-            var peptides = new List<Tuple<string, string, List<string>, double>>();
+            var peptides = new List<(string, string, List<string>, double)>();
             foreach (var seq in sequences)
             {
-                peptides.Add(Tuple.Create(seq, baseSeq, pgs, 1.0));
+                peptides.Add((seq, baseSeq, pgs, 1.0));
             }
 
             PositionFrequencyAnalysis pfa = new PositionFrequencyAnalysis();
-            pfa.PeptidePTMOccupancy(peptides);
+            pfa.ProteinGroupsOccupancyByPeptide(peptides);
             var occupancy = pfa.Occupancy;  
               
             Assert.That(6.0 == occupancy["pg1"].Proteins["pg1"].Peptides[baseSeq].ModifiedAminoAcidPositions[0]["UniProt: N - acetylglutamate on E"].Intensity);

@@ -33,7 +33,7 @@ namespace MzLibUtil
         /// <param name="modOnNTerminus"> If true, the index of modifications at the N-terminus will be 0 (zero-based indexing). Otherwise, it is the index of the first amino acid (one-based indexing).</param>
         /// <param name="modOnCTerminus"> If true, the index of modifications at the C-terminus will be one more than the index of the last amino acid. Otherwise, it is the index of the last amino acid.</param>
         /// <returns> Dictionary with the key being the amino acid position of the mod and the value being the string representing the mod</returns>
-        public static Dictionary<int, List<string>> ParseModifications(this string fullSequence, bool modOnNTerminus=false, bool modOnCTerminus=false)
+        public static Dictionary<int, List<string>> ParseModifications(this string fullSequence, bool modOnNTerminus=false, bool modOnCTerminus=false, bool ignoreTerminusMod=false)
         {
             // use a regex to get all modifications
             string pattern = @"\[(.+?)\](?<!\[I+\])"; //The "look-behind" condition prevents matching ] for metal ion modifications
@@ -63,6 +63,11 @@ namespace MzLibUtil
                 // found (including the brackets). The difference will be the number of nonmodification characters, 
                 // or the number of amino acids prior to the startIndex in the sequence. 
                 int positionToAddToDict = startIndex - captureLengthSum;
+
+                if ((positionToAddToDict == 0 || (fullSeq.Length == startIndex + captureLength)) && ignoreTerminusMod)
+                {
+                    continue;
+                }
 
                 // Handle N terminus indexing
                 if ((positionToAddToDict == 0) && !modOnNTerminus)

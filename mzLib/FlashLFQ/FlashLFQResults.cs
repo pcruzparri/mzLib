@@ -363,14 +363,13 @@ namespace FlashLFQ
 
             var peptides = _peptideModifiedSequencesToQuantify
                 .Where(pep => PeptideModifiedSequences.ContainsKey(pep))
-                .Select(pep => Tuple.Create(
-                    PeptideModifiedSequences[pep].Sequence,
-                    PeptideModifiedSequences[pep].BaseSequence,
-                    PeptideModifiedSequences[pep].ProteinGroups.Select(pg => pg.ProteinGroupName).ToList(),
-                    quantifiedPeptides.GetValueOrDefault(pep, PeptideModifiedSequences[pep].GetTotalIntensity()))).ToList();
+                .Select(pep => (PeptideModifiedSequences[pep].Sequence, 
+                                PeptideModifiedSequences[pep].BaseSequence,
+                                PeptideModifiedSequences[pep].ProteinGroups.Select(pg => pg.ProteinGroupName).ToList(),
+                                quantifiedPeptides.GetValueOrDefault(pep, PeptideModifiedSequences[pep].GetTotalIntensity()))).ToList();
 
             PositionFrequencyAnalysis pfa = new PositionFrequencyAnalysis();
-            pfa.PeptidePTMOccupancy(peptides, modOnNTerminus, modOnCTerminus);
+            pfa.ProteinGroupsOccupancyByPeptide(peptides, modOnNTerminus, modOnCTerminus);
             ModInfo = pfa.Occupancy;
         }
 

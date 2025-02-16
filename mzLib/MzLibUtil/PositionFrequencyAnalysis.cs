@@ -46,9 +46,20 @@ namespace MzLibUtil
         {
             throw new NotImplementedException();
         }
-        public void PeptideToProteinPositions(int offset=0)
+        public void PeptideToProteinPositions(int offset=0, bool UseParent=false)
         {
-            offset = offset != 0 ? offset : ParentProtein.Sequence.IndexOf(BaseSequence);
+            if (offset <= 0 && !UseParent)
+            {
+                return; // keep current mod indexing if not offsetting.
+            }
+            else if (UseParent)
+            {
+                offset = ParentProtein.Sequence.IndexOf(BaseSequence);
+            }
+
+            var modificationsToAdd = new Dictionary<int, Dictionary<string, UtilModification>>();
+            var modificationsToRemove = new List<int>();
+
             foreach (var modpos in ModifiedAminoAcidPositions.Keys)
             {
                 int positionInProtein = modpos + offset;
@@ -57,8 +68,18 @@ namespace MzLibUtil
                 {
                     mod.PeptidePositionZeroIsNTerminus = positionInProtein;
                 }
-                ModifiedAminoAcidPositions.Add(positionInProtein, mods);
+                modificationsToAdd[positionInProtein] = mods;
+                modificationsToRemove.Add(modpos);
+            }
+
+            foreach (var modpos in modificationsToRemove)
+            {
                 ModifiedAminoAcidPositions.Remove(modpos);
+            }
+
+            foreach (var modpos in modificationsToAdd)
+            {
+                ModifiedAminoAcidPositions[modpos.Key] = modpos.Value;
             }
         }
     }
@@ -68,6 +89,7 @@ namespace MzLibUtil
         public string Name { get; set; }
         public string Sequence { get; set; }
         public Dictionary<string, UtilPeptide> Peptides { get; set; }
+        public Dictionary<int, Dictionary<string, UtilModification>> ModifiedAminoAcidPositionsInProtein { get; set; }
 
         public UtilProtein(string name, Dictionary<string, UtilPeptide> peptides=null)
         {
@@ -75,12 +97,37 @@ namespace MzLibUtil
             if (peptides != null) Peptides = peptides;
             else Peptides= new Dictionary<string, UtilPeptide>();
         }
+
+        public void SetProteinModsFromPeptides()
+        {
+            // for now, this method must be used AFTER peptide mod positions are offsetted to protein positions
+            ModifiedAminoAcidPositionsInProtein = new Dictionary<int, Dictionary<string, UtilModification>>();
+            foreach (var peptide in Peptides.Values)
+            {
+                foreach (var modpos in peptide.ModifiedAminoAcidPositions)
+                {
+                    if (!ModifiedAminoAcidPositionsInProtein.ContainsKey(modpos.Key))
+                    {
+                        ModifiedAminoAcidPositionsInProtein[modpos.Key] = new Dictionary<string, UtilModification>();
+                    }
+                    foreach (var mod in modpos.Value.Values)
+                    {
+                        if (!ModifiedAminoAcidPositionsInProtein[modpos.Key].ContainsKey(mod.IdWithMotif))
+                        {
+                            ModifiedAminoAcidPositionsInProtein[modpos.Key][mod.IdWithMotif] = new UtilModification(mod.IdWithMotif, modpos.Key, 0);
+                        }
+                        ModifiedAminoAcidPositionsInProtein[modpos.Key][mod.IdWithMotif].Intensity += mod.Intensity/peptide.Intensity; // might need to add some magic later to keep stored the mod intensity and the peptide intensity for MM output
+                    }
+                }
+            }
+        }
     }
 
     public class UtilProteinGroup
     {
         public string Name { get; set;}
         public Dictionary<string, UtilProtein> Proteins {  get; set; }
+        public string OccupancyLevel { get; set; }
 
         public UtilProteinGroup(string name, Dictionary<string, UtilProtein> proteins = null)
         {
@@ -103,34 +150,31 @@ namespace MzLibUtil
         /// 
 
         public Dictionary<string, UtilProteinGroup> Occupancy { get; private set; }
-        public string OccupancyLevel { get; private set; }
 
         
-        public void PeptidePTMOccupancy(List<Tuple<string, string, List<string>, double>> peptides, bool modOnNTerminus = true, bool modOnCTerminus = true)
+        public void ProteinGroupsOccupancyByPeptide(List<(string fullSeq, string baseSeq, List<string> proteinGroup, double intensity)> peptides, bool modOnNTerminus = true, bool modOnCTerminus = true, bool ignoreTerminusMod=false)
         {
             var proteinGroups = new Dictionary<string, UtilProteinGroup>();
             
             // Go through the peptides given
             foreach (var pep in peptides)
             {
-                string fullSeq = pep.Item1;
-                string baseSeq = pep.Item2.IsNotNullOrEmpty() ? pep.Item2 : new string(pep.Item1.ToCharArray());
-                ClassExtensions.RemoveSpecialCharacters(ref baseSeq, @"", @"\[(.+?)\](?<!\[I+\])"); // in case it is null or empty and we need to get the base sequence from the full sequence
-                List<string> pgs = pep.Item3;
-                double peptideIntensity = pep.Item4;
+                string baseSeq = pep.Item2.IsNotNullOrEmpty() ? pep.Item2 : new string(pep.Item1.ToCharArray()); // in case it is null or empty and we need to get the base sequence from the full sequence
+                ClassExtensions.RemoveSpecialCharacters(ref baseSeq, @"", @"\[(.+?)\](?<!\[I+\])"); 
 
                 // Go through the peptide's protein groups
-                foreach (var pgName in pgs)
+                foreach (var pg in pep.proteinGroup)
                 {
                     // If have not seen that protein group, store it
-                    if (!proteinGroups.ContainsKey(pgName))
+                    if (!proteinGroups.ContainsKey(pg))
                     {
-                        proteinGroups[pgName] = new UtilProteinGroup(pgName);
+                        proteinGroups[pg] = new UtilProteinGroup(pg);
+                        proteinGroups[pg].OccupancyLevel = "peptide";
                     }
-                    var proteinGroup = proteinGroups[pgName];
+                    var proteinGroup = proteinGroups[pg];
 
                     // Go through the proteins in each protein group
-                    foreach (var proteinName in pgName.Split('|'))
+                    foreach (var proteinName in pg.Split('|'))
                     {
                         // Add the protein to the protein group's dictionary if it has not been added
                         if (!proteinGroup.Proteins.ContainsKey(proteinName))
@@ -141,17 +185,17 @@ namespace MzLibUtil
 
                         // If the peptide's base sequence has not been seen, add it to the protein's dictionary
                         if (!protein.Peptides.ContainsKey(baseSeq))
-    {
-                            protein.Peptides[baseSeq] = new UtilPeptide(fullSeq);
+                        {
+                            protein.Peptides[baseSeq] = new UtilPeptide(pep.fullSeq);
                             protein.Peptides[baseSeq].Intensity = 0;
                         }
 
                         // Increase the total intensity of the peptide base sequence to track the total intensity of all amino acids in that sequence
-                        protein.Peptides[baseSeq].Intensity += peptideIntensity;
+                        protein.Peptides[baseSeq].Intensity += pep.intensity;
                         var peptide = protein.Peptides[baseSeq];
 
                         // Want both arguments passed here to be true if need to later filter out peptide terminal mods that are not protein terminal mods 
-                        Dictionary<int, List<string>> peptideMods = fullSeq.ParseModifications(modOnNTerminus, modOnCTerminus);
+                        Dictionary<int, List<string>> peptideMods = pep.fullSeq.ParseModifications(modOnNTerminus, modOnCTerminus, ignoreTerminusMod);
                         // Go through the modified positions found froum the full sequence
                         foreach (var modpos in peptideMods)
         {
@@ -171,33 +215,24 @@ namespace MzLibUtil
                                     modifiedPosition[mod] = new UtilModification(mod, modpos.Key, 0);
                                 }
                                 // Increase the intensity of the modification by the intensity of the peptide
-                                modifiedPosition[mod].Intensity += peptideIntensity;
+                                modifiedPosition[mod].Intensity += pep.intensity;
                             }
                         }
                     }
                 }
             }
             Occupancy = proteinGroups;
-            OccupancyLevel = "peptide";
         }
-            
-        public void PeptideToProteinPTMOccupancy(Dictionary<string, string> proteinSequences) // combine this to previous method.
+
+        public void ProteinGroupsOccupancyByProtein(Dictionary<string, string> proteinSequences) // Dictionary<accession, sequence>
         {
-            foreach (var pg in Occupancy.Keys) 
-            {
-                UtilProteinGroup proteinGroup = Occupancy[pg];
-                foreach (var prot in proteinGroup.Proteins.Keys)
-                {
-                    UtilProtein protein = proteinGroup.Proteins[prot];
-                    foreach (var pep in protein.Peptides.Keys)
-            {
-                        UtilPeptide peptide = protein.Peptides[pep];
-                        peptide.ParentProtein = protein;
-                        peptide.PeptideToProteinPositions();
-                    }
-                }
-            }
-            OccupancyLevel = "protein";
+            throw new NotImplementedException();
+        }
+
+        public void ChangePeptideToProteinOccupancyIndex(string proteinGroupName, string proteinName, string peptide, int OneBasedStartResidue)
+        {
+            Occupancy[proteinGroupName].OccupancyLevel = "protein";
+            Occupancy[proteinGroupName].Proteins[proteinName].Peptides[peptide].PeptideToProteinPositions(OneBasedStartResidue);
         }
     }
 }
