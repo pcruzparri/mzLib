@@ -2,10 +2,7 @@
 using Assert = NUnit.Framework.Legacy.ClassicAssert;
 using MzLibUtil;
 using Readers;
-using System.Windows.Documents;
 using System.Collections.Generic;
-using System;
-using System.Security.Cryptography.X509Certificates;
 
 namespace Test
 {

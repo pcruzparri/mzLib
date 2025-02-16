@@ -79,7 +79,7 @@ namespace FlashLFQ
             {
                 return 0;
             }
-        } 
+        }
 
         public DetectionType GetDetectionType(SpectraFileInfo fileInfo)
         {
