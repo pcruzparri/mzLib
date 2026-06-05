@@ -21,10 +21,10 @@ public class SiteSpecificModificationOccupancy
     /// <summary>Count-based occupancy fraction (ModifiedCount / TotalCount).</summary>
     public double CountBasedOccupancy => TotalCount > 0 ? (double)ModifiedCount / TotalCount : 0;
 
-    /// <summary>Sum of intensities for peptides carrying this mod at this position.</summary>
+    /// <summary>Sum (or rolled-up value, depending on strategy) of intensities for peptides carrying this mod at this position.</summary>
     public double ModifiedIntensity { get; set; }
 
-    /// <summary>Sum of intensities for all peptides covering this position.</summary>
+    /// <summary>Sum (or rolled-up value, depending on strategy) of intensities for all peptides covering this position.</summary>
     public double TotalIntensity { get; set; }
 
     /// <summary>Intensity-based stoichiometry fraction (ModifiedIntensity / TotalIntensity).</summary>
@@ -42,7 +42,7 @@ public class SiteSpecificModificationOccupancy
     /// We report the zero-based position to be consistent with residue positions. This way N-terminal pos=0,
     /// C-terminal pos=length+1, and side chain modifications are at positions 1 through length.
     /// </summary>
-    public string ToModInfoString(bool intensityBased=false)
+    public string ToModInfoString(bool intensityBased = false)
     {
         if (intensityBased)
         {

@@ -263,6 +263,24 @@ namespace Omics.BioPolymerGroup
         public BioPolymerGroupType GroupType { get; }
 
         /// <summary>
+        /// Intensity rollup strategy for modification occupancy calculations.
+        /// Defaults to <see cref="IntensityRollupStrategy.Sum"/> for backward compatibility.
+        /// Must be set before <see cref="PopulateSampleGroupResults"/> is called
+        /// (i.e., before <see cref="GetTabSeparatedHeader"/> or <see cref="ToString"/>).
+        /// Setting this property invalidates <see cref="SampleGroupResults"/>.
+        /// </summary>
+        public IntensityRollupStrategy OccupancyRollupStrategy
+        {
+            get => _occupancyRollupStrategy;
+            set
+            {
+                _occupancyRollupStrategy = value;
+                SampleGroupResults = null;
+            }
+        }
+        private IntensityRollupStrategy _occupancyRollupStrategy = IntensityRollupStrategy.Sum;
+
+        /// <summary>
         /// Cached sequence coverage results from <see cref="CalculateSequenceCoverage"/>.
         /// Null until coverage is calculated. Invalidated when <see cref="MergeWith"/> is called.
         /// </summary>
@@ -313,7 +331,15 @@ namespace Omics.BioPolymerGroup
                     sb.Append($"Intensity_{group.Label}\t");
                 sb.Append($"CountOccupancy_{group.Label}\t");
                 if (group.HasIntensityData)
-                    sb.Append($"IntensityOccupancy_{group.Label}\t");
+                {
+                    string prefix = OccupancyRollupStrategy switch
+                    {
+                        IntensityRollupStrategy.Mean => "MeanIntensityOccupancy",
+                        IntensityRollupStrategy.Median => "MedianIntensityOccupancy",
+                        _ => "IntensityOccupancy"
+                    };
+                    sb.Append($"{prefix}_{group.Label}\t");
+                }
             }
             #endregion
 
@@ -656,7 +682,7 @@ namespace Omics.BioPolymerGroup
                 foreach (var bioPolymer in ListOfBioPolymersOrderedByAccession)
                 {
                     var occupancy = ModificationOccupancyCalculator.CalculateParentLevelOccupancy(
-                        bioPolymer, psms);
+                        bioPolymer, psms, OccupancyRollupStrategy);
 
                     if (occupancy.Count > 0)
                         result.ParentOccupancy[bioPolymer.Accession] = occupancy;
@@ -667,7 +693,8 @@ namespace Omics.BioPolymerGroup
                 var psmsGroupedByBaseSequence = psms.GroupBy(p => p.BaseSequence);
                 foreach (var baseSeqGroup in psmsGroupedByBaseSequence)
                 { 
-                    var occupancy = ModificationOccupancyCalculator.CalculateDigestionProductLevelOccupancy(baseSeqGroup.ToList());
+                    var occupancy = ModificationOccupancyCalculator.CalculateDigestionProductLevelOccupancy(
+                        baseSeqGroup.ToList(), OccupancyRollupStrategy);
 
                     if (occupancy.Count > 0)
                     {
@@ -759,7 +786,8 @@ namespace Omics.BioPolymerGroup
                 GroupType)
             {
                 AllPsmsBelowOnePercentFDR = allPsmsForThisFile,
-                DisplayModsOnPeptides = DisplayModsOnPeptides
+                DisplayModsOnPeptides = DisplayModsOnPeptides,
+                OccupancyRollupStrategy = OccupancyRollupStrategy
             };
 
             if (SamplesForQuantification != null)

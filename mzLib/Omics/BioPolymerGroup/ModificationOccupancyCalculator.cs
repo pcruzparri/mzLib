@@ -1,9 +1,7 @@
-using CsvHelper.Configuration.Attributes;
 using MzLibUtil;
 using Omics.BioPolymer;
 using Omics.Modifications;
 using Omics.SpectralMatch;
-using System.Numerics;
 
 namespace Omics.BioPolymerGroup;
 
@@ -33,9 +31,12 @@ public static class ModificationOccupancyCalculator
     /// PSMs whose <see cref="ISpectralMatch.Intensities"/> is a single-element array contribute
     /// to intensity-based stoichiometry; others contribute only to count-based metrics.
     /// </param>
+    /// <param name="strategy">Intensity rollup strategy for computing intensity-based stoichiometry.
+    /// Defaults to <see cref="IntensityRollupStrategy.Sum"/> for backward compatibility.</param>
     public static Dictionary<int, List<SiteSpecificModificationOccupancy>> CalculateParentLevelOccupancy(
         IBioPolymer bioPolymer,
-        IEnumerable<ISpectralMatch> psms)
+        IEnumerable<ISpectralMatch> psms,
+        IntensityRollupStrategy strategy = IntensityRollupStrategy.Sum)
     {
         var psmList = psms as IList<ISpectralMatch> ?? psms.ToList();
 
@@ -48,7 +49,12 @@ public static class ModificationOccupancyCalculator
                     && s.Parent.Accession == bioPolymer.Accession))
             .ToArray();
 
-        var positionTotals = new Dictionary<int, (int totalCount, double totalIntensity)>();
+        // Pass 1: accumulate totals per position.
+        var positionTotals = new Dictionary<int, (int totalCount, double totalIntensitySum)>();
+        var positionIntensities = strategy == IntensityRollupStrategy.Sum
+            ? null
+            : new Dictionary<int, List<double>>();
+
         for (int j = 0; j < psmList.Count; j++)
         {
             var psm = psmList[j];
@@ -81,12 +87,20 @@ public static class ModificationOccupancyCalculator
                 var totals = positionTotals[i];
                 totals.totalCount++;
                 if (psm.Intensities is { Length: 1 })
-                    totals.totalIntensity += psm.Intensities[0];
+                {
+                    totals.totalIntensitySum += psm.Intensities[0];
+                    positionIntensities?.AddToList(i, psm.Intensities[0]);
+                }
                 positionTotals[i] = totals;
             }
         }
 
+        // Pass 2: build occupancy entries per modification site.
         var working = new Dictionary<int, Dictionary<string, SiteSpecificModificationOccupancy>>();
+        var modifiedIntensities = strategy == IntensityRollupStrategy.Sum
+            ? null
+            : new Dictionary<(int position, string modId), List<double>>();
+
         for (int j = 0; j < psmList.Count; j++)
         {
             var psm = psmList[j];
@@ -116,14 +130,38 @@ public static class ModificationOccupancyCalculator
                     modsAtPosition[mod.Value.IdWithMotif] = new SiteSpecificModificationOccupancy(indexInProtein, mod.Value.IdWithMotif)
                     {
                         TotalCount = posTotals.totalCount,
-                        TotalIntensity = posTotals.totalIntensity
+                        TotalIntensity = posTotals.totalIntensitySum
                     };
                 }
 
                 var siteOcc = modsAtPosition[mod.Value.IdWithMotif];
                 siteOcc.ModifiedCount++;
                 if (psm.Intensities is { Length: 1 })
+                {
                     siteOcc.ModifiedIntensity += psm.Intensities[0];
+                    modifiedIntensities?.AddToList((indexInProtein, mod.Value.IdWithMotif), psm.Intensities[0]);
+                }
+            }
+        }
+
+        // Post-process: apply rollup strategy for non-Sum strategies.
+        if (strategy != IntensityRollupStrategy.Sum && working.Count > 0)
+        {
+            foreach (var kvp in working)
+            {
+                int position = kvp.Key;
+                if (!positionIntensities!.TryGetValue(position, out var allIntensities))
+                    allIntensities = new List<double>();
+
+                foreach (var siteKvp in kvp.Value)
+                {
+                    var site = siteKvp.Value;
+                    if (!modifiedIntensities!.TryGetValue((position, site.ModificationIdWithMotif), out var modIntensities))
+                        modIntensities = new List<double>();
+
+                    site.TotalIntensity = ApplyStrategy(allIntensities, strategy);
+                    site.ModifiedIntensity = ApplyStrategy(modIntensities, strategy);
+                }
             }
         }
 
@@ -140,12 +178,15 @@ public static class ModificationOccupancyCalculator
     /// PSMs whose <see cref="ISpectralMatch.Intensities"/> is a single-element array contribute
     /// to intensity-based stoichiometry; others contribute only to count-based metrics.
     /// </param>
+    /// <param name="strategy">Intensity rollup strategy for computing intensity-based stoichiometry.
+    /// Defaults to <see cref="IntensityRollupStrategy.Sum"/> for backward compatibility.</param>
     /// <returns>
     /// Dictionary keyed by peptide-local position (AllModsOneIsNterminus convention) containing 
     /// <see cref="SiteSpecificModificationOccupancy"/> entries.
     /// </returns>
     public static Dictionary<int, List<SiteSpecificModificationOccupancy>> CalculateDigestionProductLevelOccupancy(
-        IEnumerable<ISpectralMatch> psms)
+        IEnumerable<ISpectralMatch> psms,
+        IntensityRollupStrategy strategy = IntensityRollupStrategy.Sum)
     {
         var psmList = psms as IList<ISpectralMatch> ?? psms.ToList();
         var result = new Dictionary<string, Dictionary<int, List<SiteSpecificModificationOccupancy>>>();
@@ -166,11 +207,21 @@ public static class ModificationOccupancyCalculator
                     .FirstOrDefault(s => s.FullSequence == p.FullSequence));
 
         var totalCount = psmsWithBaseSeq.Count;
-        var totalIntensity = psmsWithBaseSeq
+        var totalIntensitySum = psmsWithBaseSeq
             .Where(p => p.Intensities is { Length: 1 })
             .Sum(p => p.Intensities[0]);
+        var allIntensities = strategy == IntensityRollupStrategy.Sum
+            ? null
+            : psmsWithBaseSeq
+                .Where(p => p.Intensities is { Length: 1 })
+                .Select(p => p.Intensities[0])
+                .ToList();
 
         var working = new Dictionary<int, Dictionary<string, SiteSpecificModificationOccupancy>>();
+        var modifiedIntensities = strategy == IntensityRollupStrategy.Sum
+            ? null
+            : new Dictionary<(int position, string modId), List<double>>();
+
         foreach (var psm in psmsWithBaseSeq)
         {
             var form = psmToForm[psm];
@@ -193,14 +244,37 @@ public static class ModificationOccupancyCalculator
                     modsAtPosition[mod.Value.IdWithMotif] = new SiteSpecificModificationOccupancy(mod.Key, mod.Value.IdWithMotif)
                     {
                         TotalCount = totalCount,
-                        TotalIntensity = totalIntensity
+                        TotalIntensity = totalIntensitySum
                     };
                 }
 
                 var siteOcc = modsAtPosition[mod.Value.IdWithMotif];
                 siteOcc.ModifiedCount++;
                 if (psm.Intensities is { Length: 1 })
+                {
                     siteOcc.ModifiedIntensity += psm.Intensities[0];
+                    modifiedIntensities?.AddToList((mod.Key, mod.Value.IdWithMotif), psm.Intensities[0]);
+                }
+            }
+        }
+
+        // Post-process: apply rollup strategy for non-Sum strategies.
+        if (strategy != IntensityRollupStrategy.Sum && working.Count > 0)
+        {
+            double totalRolledUp = ApplyStrategy(allIntensities!, strategy);
+
+            foreach (var kvp in working)
+            {
+                int position = kvp.Key;
+                foreach (var siteKvp in kvp.Value)
+                {
+                    var site = siteKvp.Value;
+                    if (!modifiedIntensities!.TryGetValue((position, site.ModificationIdWithMotif), out var modIntensities))
+                        modIntensities = new List<double>();
+
+                    site.TotalIntensity = totalRolledUp;
+                    site.ModifiedIntensity = ApplyStrategy(modIntensities, strategy);
+                }
             }
         }
 
@@ -208,6 +282,49 @@ public static class ModificationOccupancyCalculator
             return new Dictionary<int, List<SiteSpecificModificationOccupancy>>(); // Return empty if no mods passed filtering
 
         return working.ToDictionary(kvp => kvp.Key, kvp => kvp.Value.Values.ToList());
+    }
+
+    /// <summary>
+    /// Applies the specified rollup strategy to a list of intensity values.
+    /// </summary>
+    private static double ApplyStrategy(List<double> values, IntensityRollupStrategy strategy)
+    {
+        if (values.Count == 0)
+            return 0;
+
+        return strategy switch
+        {
+            IntensityRollupStrategy.Mean => values.Average(),
+            IntensityRollupStrategy.Median => Median(values),
+            _ => values.Sum()
+        };
+    }
+
+    /// <summary>
+    /// Computes the median of a list of values.
+    /// For an even number of elements, returns the average of the two middle values.
+    /// </summary>
+    private static double Median(List<double> values)
+    {
+        if (values.Count == 0)
+            return 0;
+
+        var sorted = values.OrderBy(v => v).ToList();
+        int n = sorted.Count;
+        if (n % 2 == 1)
+            return sorted[n / 2];
+        return (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0;
+    }
+
+    private static void AddToList<TKey>(this Dictionary<TKey, List<double>> dict, TKey key, double value)
+        where TKey : notnull
+    {
+        if (!dict.TryGetValue(key, out var list))
+        {
+            list = new List<double>();
+            dict[key] = list;
+        }
+        list.Add(value);
     }
 
     private static bool TryGetProteinPosition(
