@@ -265,9 +265,8 @@ namespace Omics.BioPolymerGroup
         /// <summary>
         /// Intensity rollup strategy for modification occupancy calculations.
         /// Defaults to <see cref="IntensityRollupStrategy.Sum"/> for backward compatibility.
-        /// Must be set before <see cref="PopulateSampleGroupResults"/> is called
-        /// (i.e., before <see cref="GetTabSeparatedHeader"/> or <see cref="ToString"/>).
-        /// Setting this property invalidates <see cref="SampleGroupResults"/>.
+        /// Can be set at any time; changing the value invalidates <see cref="SampleGroupResults"/>
+        /// and forces recomputation on next access.
         /// </summary>
         public IntensityRollupStrategy OccupancyRollupStrategy
         {
@@ -336,7 +335,8 @@ namespace Omics.BioPolymerGroup
                     {
                         IntensityRollupStrategy.Mean => "MeanIntensityOccupancy",
                         IntensityRollupStrategy.Median => "MedianIntensityOccupancy",
-                        _ => "IntensityOccupancy"
+                        IntensityRollupStrategy.Sum => "IntensityOccupancy",
+                        _ => throw new ArgumentOutOfRangeException(nameof(OccupancyRollupStrategy), OccupancyRollupStrategy, $"Unsupported rollup strategy: {OccupancyRollupStrategy}")
                     };
                     sb.Append($"{prefix}_{group.Label}\t");
                 }

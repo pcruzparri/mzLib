@@ -150,14 +150,12 @@ public static class ModificationOccupancyCalculator
             foreach (var kvp in working)
             {
                 int position = kvp.Key;
-                if (!positionIntensities!.TryGetValue(position, out var allIntensities))
-                    allIntensities = new List<double>();
+                var allIntensities = positionIntensities?.GetValueOrDefault(position) ?? new List<double>();
 
                 foreach (var siteKvp in kvp.Value)
                 {
                     var site = siteKvp.Value;
-                    if (!modifiedIntensities!.TryGetValue((position, site.ModificationIdWithMotif), out var modIntensities))
-                        modIntensities = new List<double>();
+                    var modIntensities = modifiedIntensities?.GetValueOrDefault((position, site.ModificationIdWithMotif)) ?? new List<double>();
 
                     site.TotalIntensity = ApplyStrategy(allIntensities, strategy);
                     site.ModifiedIntensity = ApplyStrategy(modIntensities, strategy);
@@ -261,7 +259,8 @@ public static class ModificationOccupancyCalculator
         // Post-process: apply rollup strategy for non-Sum strategies.
         if (strategy != IntensityRollupStrategy.Sum && working.Count > 0)
         {
-            double totalRolledUp = ApplyStrategy(allIntensities!, strategy);
+            var intensities = allIntensities ?? new List<double>();
+            double totalRolledUp = ApplyStrategy(intensities, strategy);
 
             foreach (var kvp in working)
             {
@@ -269,8 +268,7 @@ public static class ModificationOccupancyCalculator
                 foreach (var siteKvp in kvp.Value)
                 {
                     var site = siteKvp.Value;
-                    if (!modifiedIntensities!.TryGetValue((position, site.ModificationIdWithMotif), out var modIntensities))
-                        modIntensities = new List<double>();
+                    var modIntensities = modifiedIntensities?.GetValueOrDefault((position, site.ModificationIdWithMotif)) ?? new List<double>();
 
                     site.TotalIntensity = totalRolledUp;
                     site.ModifiedIntensity = ApplyStrategy(modIntensities, strategy);
@@ -296,7 +294,8 @@ public static class ModificationOccupancyCalculator
         {
             IntensityRollupStrategy.Mean => values.Average(),
             IntensityRollupStrategy.Median => Median(values),
-            _ => values.Sum()
+            IntensityRollupStrategy.Sum => values.Sum(),
+            _ => throw new ArgumentOutOfRangeException(nameof(strategy), strategy, $"Unsupported rollup strategy: {strategy}")
         };
     }
 

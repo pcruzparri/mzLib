@@ -15,6 +15,9 @@ public enum IntensityRollupStrategy
     /// <summary>
     /// Arithmetic mean of PSM intensities. Reduces influence of high-abundance outlier PSMs.
     /// Stoichiometry = Mean(modified PSM intensities) / Mean(all PSM intensities covering the site).
+    /// Note: The mean ratio can exceed 1.0 when the mean modified intensity is greater
+    /// than the mean total intensity (e.g., when modified PSMs are systematically higher
+    /// intensity than unmodified PSMs).
     /// </summary>
     Mean,
 
