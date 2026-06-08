@@ -76,6 +76,7 @@ public sealed class SampleGroupResult
     /// (AllModsOneIsNterminus convention: 1 = N-terminus, 2 = first residue, etc.).
     /// Populated by <see cref="ModificationOccupancyCalculator.CalculateDigestionProductLevelOccupancy"/>.
     /// </summary>
+    [Obsolete("Use PeptideGroup instead of storing digestion-product occupancy on SampleGroupResult.")]
     public Dictionary<string, Dictionary<int, List<SiteSpecificModificationOccupancy>>> DigestionProductOccupancy { get; } = new();
 
     #endregion
@@ -97,7 +98,9 @@ public sealed class SampleGroupResult
     /// <param name="intensityBased">True to format intensity-based stoichiometry; false for count-based occupancy.</param>
     public string FormatOccupancy(IEnumerable<string> orderedKeys, bool proteinLevel = true, bool intensityBased = false)
     {
+#pragma warning disable CS0618
         var occupancy = proteinLevel ? ParentOccupancy : DigestionProductOccupancy;
+#pragma warning restore CS0618
         return FormatOccupancy(occupancy, orderedKeys, o => o.ToModInfoString(intensityBased));
     }
 

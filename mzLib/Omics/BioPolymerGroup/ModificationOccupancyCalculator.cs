@@ -187,9 +187,11 @@ public static class ModificationOccupancyCalculator
         IntensityRollupStrategy strategy = IntensityRollupStrategy.Sum)
     {
         var psmList = psms as IList<ISpectralMatch> ?? psms.ToList();
-        var result = new Dictionary<string, Dictionary<int, List<SiteSpecificModificationOccupancy>>>();
 
         var psmsWithBaseSeq = psmList.Where(p => p.BaseSequence != null).ToList();
+
+        if (psmsWithBaseSeq.Count == 0)
+            return new Dictionary<int, List<SiteSpecificModificationOccupancy>>();
 
         if (!psmsWithBaseSeq.Select(p => p.BaseSequence).AllSame())
         {
@@ -208,17 +210,8 @@ public static class ModificationOccupancyCalculator
         var totalIntensitySum = psmsWithBaseSeq
             .Where(p => p.Intensities is { Length: 1 })
             .Sum(p => p.Intensities[0]);
-        var allIntensities = strategy == IntensityRollupStrategy.Sum
-            ? null
-            : psmsWithBaseSeq
-                .Where(p => p.Intensities is { Length: 1 })
-                .Select(p => p.Intensities[0])
-                .ToList();
 
         var working = new Dictionary<int, Dictionary<string, SiteSpecificModificationOccupancy>>();
-        var modifiedIntensities = strategy == IntensityRollupStrategy.Sum
-            ? null
-            : new Dictionary<(int position, string modId), List<double>>();
 
         foreach (var psm in psmsWithBaseSeq)
         {
@@ -251,27 +244,6 @@ public static class ModificationOccupancyCalculator
                 if (psm.Intensities is { Length: 1 })
                 {
                     siteOcc.ModifiedIntensity += psm.Intensities[0];
-                    modifiedIntensities?.AddToList((mod.Key, mod.Value.IdWithMotif), psm.Intensities[0]);
-                }
-            }
-        }
-
-        // Post-process: apply rollup strategy for non-Sum strategies.
-        if (strategy != IntensityRollupStrategy.Sum && working.Count > 0)
-        {
-            var intensities = allIntensities ?? new List<double>();
-            double totalRolledUp = ApplyStrategy(intensities, strategy);
-
-            foreach (var kvp in working)
-            {
-                int position = kvp.Key;
-                foreach (var siteKvp in kvp.Value)
-                {
-                    var site = siteKvp.Value;
-                    var modIntensities = modifiedIntensities?.GetValueOrDefault((position, site.ModificationIdWithMotif)) ?? new List<double>();
-
-                    site.TotalIntensity = totalRolledUp;
-                    site.ModifiedIntensity = ApplyStrategy(modIntensities, strategy);
                 }
             }
         }
@@ -280,6 +252,203 @@ public static class ModificationOccupancyCalculator
             return new Dictionary<int, List<SiteSpecificModificationOccupancy>>(); // Return empty if no mods passed filtering
 
         return working.ToDictionary(kvp => kvp.Key, kvp => kvp.Value.Values.ToList());
+    }
+
+    /// <summary>
+    /// Calculates per-site modification occupancy mapped to protein coordinates by first computing
+    /// per-peptide occupancy ratios, then aggregating those ratios across peptides using the specified
+    /// strategy. This produces bounded [0, 1] stoichiometry values that are not susceptible to the
+    /// ratio-of-aggregates bias that affects <see cref="CalculateParentLevelOccupancy"/> with
+    /// non-Sum strategies.
+    /// </summary>
+    /// <param name="bioPolymer">The parent biopolymer whose length defines the coordinate space.</param>
+    /// <param name="psms">All PSMs to consider. Forms are filtered to <paramref name="bioPolymer"/> internally.</param>
+    /// <param name="strategy">Aggregation strategy for combining per-peptide occupancies.
+    /// Must be <see cref="IntensityRollupStrategy.Mean"/> or <see cref="IntensityRollupStrategy.Median"/>.
+    /// For <see cref="IntensityRollupStrategy.Sum"/>, use <see cref="CalculateParentLevelOccupancy"/> instead.</param>
+    /// <returns>
+    /// Dictionary keyed by one-based protein position (AllModsOneIsNterminus convention) containing
+    /// <see cref="SiteSpecificModificationOccupancy"/> entries with aggregated stoichiometry.
+    /// </returns>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// Thrown when <paramref name="strategy"/> is <see cref="IntensityRollupStrategy.Sum"/>.
+    /// </exception>
+    public static Dictionary<int, List<SiteSpecificModificationOccupancy>> CalculateParentLevelOccupancyByPeptide(
+        IBioPolymer bioPolymer,
+        IEnumerable<ISpectralMatch> psms,
+        IntensityRollupStrategy strategy)
+    {
+        if (strategy == IntensityRollupStrategy.Sum)
+            throw new ArgumentOutOfRangeException(nameof(strategy), strategy,
+                "Sum strategy should use CalculateParentLevelOccupancy directly.");
+
+        var psmList = psms as IList<ISpectralMatch> ?? psms.ToList();
+
+        // Resolve forms via parallel arrays (avoids ToDictionary duplicate-key crash).
+        var psmForms = new IBioPolymerWithSetMods?[psmList.Count];
+        for (int j = 0; j < psmList.Count; j++)
+        {
+            var psm = psmList[j];
+            var form = psm.GetIdentifiedBioPolymersWithSetMods()
+                .FirstOrDefault(s => s.FullSequence != null
+                    && s.BaseSequence == psm.BaseSequence
+                    && s.FullSequence == psm.FullSequence
+                    && s.Parent.Accession == bioPolymer.Accession);
+
+            if (form is null)
+            {
+                try
+                {
+                    form = psm.GetIdentifiedBioPolymersWithSetMods()
+                        .FirstOrDefault(s => s.BaseSequence == psm.BaseSequence
+                            && s.Parent.Accession == bioPolymer.Accession);
+                }
+                catch (Exception)
+                {
+                    // Leave as null — PSM will be skipped.
+                }
+            }
+            psmForms[j] = form;
+        }
+
+        // Group PSMs by peptide: unique combination of BaseSequence, Start, End on this protein.
+        var peptideGroups = new List<List<int>>(); // indices into psmList
+        var peptideKeys = new HashSet<(string baseSeq, int start, int end)>();
+        for (int j = 0; j < psmList.Count; j++)
+        {
+            if (psmForms[j] is null) continue;
+            var key = (psmForms[j]!.BaseSequence, psmForms[j]!.OneBasedStartResidue, psmForms[j]!.OneBasedEndResidue);
+            if (!peptideKeys.TryGetValue(key, out _))
+            {
+                peptideKeys.Add(key);
+                var indices = new List<int>();
+                for (int k = 0; k < psmList.Count; k++)
+                {
+                if (psmForms[k] is not null
+                    && psmForms[k]!.BaseSequence == key.BaseSequence
+                    && psmForms[k]!.OneBasedStartResidue == key.OneBasedStartResidue
+                    && psmForms[k]!.OneBasedEndResidue == key.OneBasedEndResidue)
+                    {
+                        indices.Add(k);
+                    }
+                }
+                peptideGroups.Add(indices);
+            }
+        }
+
+        // Per-peptide data: occupancy dict, covered positions, total intensity, total count
+        var peptideData = new List<(
+            Dictionary<int, List<SiteSpecificModificationOccupancy>> occupancy,
+            int rangeStart,
+            int rangeEnd,
+            double totalIntensity,
+            int totalCount)>();
+        var allKeys = new HashSet<(int position, string modId)>();
+
+        foreach (var indices in peptideGroups)
+        {
+            var peptidePsms = indices.Select(i => psmList[i]).ToList();
+            var occupancy = CalculateParentLevelOccupancy(bioPolymer, peptidePsms, IntensityRollupStrategy.Sum);
+
+            var form = psmForms[indices[0]]!;
+            int rangeStart = form.OneBasedStartResidue + (form.OneBasedStartResidue == 1 ? 0 : 1);
+            int rangeEnd = form.OneBasedEndResidue + (form.OneBasedEndResidue == bioPolymer.Length ? 2 : 1);
+
+            double totalIntensity = peptidePsms
+                .Where(p => p.Intensities is { Length: 1 })
+                .Sum(p => p.Intensities[0]);
+            int totalCount = peptidePsms.Count;
+
+            peptideData.Add((occupancy, rangeStart, rangeEnd, totalIntensity, totalCount));
+
+            foreach (var posKvp in occupancy)
+            {
+                foreach (var site in posKvp.Value)
+                {
+                    allKeys.Add((posKvp.Key, site.ModificationIdWithMotif));
+                }
+            }
+        }
+
+        // Collect per-peptide occupancy values, including 0.0 for unmodified peptides that cover the site.
+        var occupancyByPeptide = new Dictionary<(int position, string modId), List<double>>();
+        var countByPeptide = new Dictionary<(int position, string modId), List<int>>();
+        var totalCountByPeptide = new Dictionary<(int position, string modId), List<int>>();
+        var modifiedIntensityByPeptide = new Dictionary<(int position, string modId), List<double>>();
+        var totalIntensityByPeptide = new Dictionary<(int position, string modId), List<double>>();
+
+        foreach (var pd in peptideData)
+        {
+            foreach (var key in allKeys)
+            {
+                if (key.position < pd.rangeStart || key.position > pd.rangeEnd)
+                    continue; // Peptide does not cover this position
+
+                double stoichiometry = 0.0;
+                int modifiedCount = 0;
+                double modifiedIntensity = 0.0;
+
+                if (pd.occupancy.TryGetValue(key.position, out var mods)
+                    && mods.FirstOrDefault(m => m.ModificationIdWithMotif == key.modId) is { } site)
+                {
+                    stoichiometry = site.IntensityBasedStoichiometry;
+                    modifiedCount = site.ModifiedCount;
+                    modifiedIntensity = site.ModifiedIntensity;
+                }
+
+                occupancyByPeptide.AddToList(key, stoichiometry);
+                if (!countByPeptide.TryGetValue(key, out var countList))
+                {
+                    countList = new List<int>();
+                    countByPeptide[key] = countList;
+                }
+                countList.Add(modifiedCount);
+                if (!totalCountByPeptide.TryGetValue(key, out var totalCountList))
+                {
+                    totalCountList = new List<int>();
+                    totalCountByPeptide[key] = totalCountList;
+                }
+                totalCountList.Add(pd.totalCount);
+                modifiedIntensityByPeptide.AddToList(key, modifiedIntensity);
+                totalIntensityByPeptide.AddToList(key, pd.totalIntensity);
+            }
+        }
+
+        // Aggregate per-peptide occupancies using the specified strategy.
+        var result = new Dictionary<int, List<SiteSpecificModificationOccupancy>>();
+        foreach (var kvp in occupancyByPeptide)
+        {
+            var (position, modId) = kvp.Key;
+            var stoichiometries = kvp.Value;
+
+            double aggregatedStoichiometry = ApplyStrategy(stoichiometries, strategy);
+
+            // Sum counts and intensities across all peptides for this site.
+            int totalModifiedCount = countByPeptide[kvp.Key].Sum();
+            int totalCount = totalCountByPeptide[kvp.Key].Sum();
+            double totalModifiedIntensity = modifiedIntensityByPeptide[kvp.Key].Sum();
+            double totalTotalIntensity = totalIntensityByPeptide[kvp.Key].Sum();
+
+            var site = new SiteSpecificModificationOccupancy(position, modId)
+            {
+                ModifiedCount = totalModifiedCount,
+                TotalCount = totalCount,
+                ModifiedIntensity = totalModifiedIntensity,
+                TotalIntensity = totalTotalIntensity,
+                IntensityBasedStoichiometry = aggregatedStoichiometry,
+                PeptideCount = totalCountByPeptide[kvp.Key].Count,
+                ModifiedPeptideCount = countByPeptide[kvp.Key].Count(c => c > 0)
+            };
+
+            if (!result.TryGetValue(position, out var modsAtPosition))
+            {
+                modsAtPosition = new List<SiteSpecificModificationOccupancy>();
+                result[position] = modsAtPosition;
+            }
+            modsAtPosition.Add(site);
+        }
+
+        return result;
     }
 
     /// <summary>

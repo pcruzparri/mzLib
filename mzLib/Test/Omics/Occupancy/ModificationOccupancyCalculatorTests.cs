@@ -3,6 +3,7 @@ using Omics;
 using Omics.BioPolymerGroup;
 using Omics.Modifications;
 using Omics.SpectralMatch;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
@@ -493,7 +494,7 @@ public class ModificationOccupancyCalculatorTests
     }
 
     [Test]
-    public void PeptideLevel_MeanStrategy_CorrectAverages()
+    public void PeptideLevel_MeanStrategy_FallsBackToSum()
     {
         var protein = new MockBioPolymer("ACDEFGHIK", "P00001");
         ModificationMotif.TryGetMotif("D", out var motif);
@@ -514,15 +515,14 @@ public class ModificationOccupancyCalculatorTests
             [psm1, psm2, psm3], IntensityRollupStrategy.Mean);
 
         var site = result[4][0];
-        // Mean(modified) = 1e6 / 1 = 1e6
-        // Mean(total) = (1e6 + 3e6 + 5e6) / 3 = 3e6
+        // At peptide level, Mean/Median fall back to Sum (single peptide, per-PSM aggregation is invalid)
         Assert.That(site.ModifiedIntensity, Is.EqualTo(1_000_000.0));
-        Assert.That(site.TotalIntensity, Is.EqualTo(3_000_000.0));
-        Assert.That(site.IntensityBasedStoichiometry, Is.EqualTo(1.0 / 3.0).Within(1e-10));
+        Assert.That(site.TotalIntensity, Is.EqualTo(9_000_000.0));
+        Assert.That(site.IntensityBasedStoichiometry, Is.EqualTo(1.0 / 9.0).Within(1e-10));
     }
 
     [Test]
-    public void PeptideLevel_MedianStrategy_CorrectMedian()
+    public void PeptideLevel_MedianStrategy_FallsBackToSum()
     {
         var protein = new MockBioPolymer("ACDEFGHIK", "P00001");
         ModificationMotif.TryGetMotif("D", out var motif);
@@ -545,11 +545,259 @@ public class ModificationOccupancyCalculatorTests
             [psm1, psm2, psm3, psm4], IntensityRollupStrategy.Median);
 
         var site = result[4][0];
-        // Median(modified) = [10] -> 10
-        // Median(total) = [1, 10, 20, 100] -> (10 + 20) / 2 = 15
+        // At peptide level, Mean/Median fall back to Sum
         Assert.That(site.ModifiedIntensity, Is.EqualTo(10.0));
-        Assert.That(site.TotalIntensity, Is.EqualTo(15.0));
-        Assert.That(site.IntensityBasedStoichiometry, Is.EqualTo(10.0 / 15.0).Within(1e-10));
+        Assert.That(site.TotalIntensity, Is.EqualTo(131.0));
+        Assert.That(site.IntensityBasedStoichiometry, Is.EqualTo(10.0 / 131.0).Within(1e-10));
+    }
+
+    [Test]
+    public void PeptideLevel_EmptyInput_ReturnsEmpty()
+    {
+        var result = ModificationOccupancyCalculator.CalculateDigestionProductLevelOccupancy(
+            Array.Empty<ISpectralMatch>());
+
+        Assert.That(result, Is.Empty);
+    }
+
+    #endregion
+
+    #region CalculateParentLevelOccupancyByPeptide Tests (Option 3)
+
+    [Test]
+    public void ParentLevelByPeptide_Mean_NeverExceedsOne()
+    {
+        var protein = new MockBioPolymer("ACDEFGHIK", "P00001");
+        ModificationMotif.TryGetMotif("D", out var motif);
+        var mod = new Modification("Phosphorylation", null, "Biological", null, motif, "Anywhere.", null, 79.966);
+
+        // Peptide 1: ACDEF (pos 1-5), modified at D (pos 4)
+        var mods1 = new Dictionary<int, Modification> { { 4, mod } };
+        var peptide1Modified = new MockBioPolymerWithSetMods("ACDEF", "ACD[Phosphorylation]EF", protein, 1, 5, mods1);
+        var peptide1Unmod = new MockBioPolymerWithSetMods("ACDEF", "ACDEF", protein, 1, 5);
+
+        // Peptide 2: CDEFG (pos 2-6), covers D (pos 4) but unmodified
+        var peptide2 = new MockBioPolymerWithSetMods("CDEFG", "CDEFG", protein, 2, 6);
+
+        // PSMs for peptide 1: 1 modified (intensity 1e6), 1 unmodified (intensity 3e6)
+        var psm1 = new MockSpectralMatch("test.raw", "ACD[Phosphorylation]EF", "ACDEF", 1.0, 1, [peptide1Modified]);
+        psm1.Intensities = [1_000_000.0];
+        var psm2 = new MockSpectralMatch("test.raw", "ACDEF", "ACDEF", 1.0, 2, [peptide1Unmod]);
+        psm2.Intensities = [3_000_000.0];
+
+        // PSMs for peptide 2: 1 unmodified (intensity 1e6)
+        var psm3 = new MockSpectralMatch("test.raw", "CDEFG", "CDEFG", 1.0, 3, [peptide2]);
+        psm3.Intensities = [1_000_000.0];
+
+        var result = ModificationOccupancyCalculator.CalculateParentLevelOccupancyByPeptide(
+            protein, [psm1, psm2, psm3], IntensityRollupStrategy.Mean);
+
+        var site = result[4][0];
+        // Per-peptide occupancies:
+        //   Peptide 1: 1e6 / (1e6 + 3e6) = 0.25
+        //   Peptide 2: 0 / 1e6 = 0
+        // Mean = (0.25 + 0) / 2 = 0.125
+        Assert.That(site.IntensityBasedStoichiometry, Is.EqualTo(0.125).Within(1e-10));
+        Assert.That(site.IntensityBasedStoichiometry, Is.LessThanOrEqualTo(1.0));
+        Assert.That(site.IntensityBasedStoichiometry, Is.GreaterThanOrEqualTo(0.0));
+    }
+
+    [Test]
+    public void ParentLevelByPeptide_Median_NeverExceedsOne()
+    {
+        var protein = new MockBioPolymer("ACDEFGHIKLMNPQR", "P00001");
+        ModificationMotif.TryGetMotif("D", out var motif);
+        var mod = new Modification("Phosphorylation", null, "Biological", null, motif, "Anywhere.", null, 79.966);
+
+        // Three peptides covering position 4 (D), each with different occupancy ratios
+        var mods = new Dictionary<int, Modification> { { 4, mod } };
+
+        var pep1Mod = new MockBioPolymerWithSetMods("ACDEF", "ACD[Phosphorylation]EF", protein, 1, 5, mods);
+        var pep1Unmod = new MockBioPolymerWithSetMods("ACDEF", "ACDEF", protein, 1, 5);
+        var pep2 = new MockBioPolymerWithSetMods("CDEFG", "CDEFG", protein, 2, 6);
+        var pep3Mod = new MockBioPolymerWithSetMods("BCDEF", "B[Phosphorylation]CDEF", protein, 2, 6,
+            new Dictionary<int, Modification> { { 3, mod } });
+        var pep3Unmod = new MockBioPolymerWithSetMods("BCDEF", "BCDEF", protein, 2, 6);
+
+        // Peptide 1: 1 modified (1e6), 1 unmodified (3e6) -> ratio = 0.25
+        var psm1 = new MockSpectralMatch("test.raw", "ACD[Phosphorylation]EF", "ACDEF", 1.0, 1, [pep1Mod]);
+        psm1.Intensities = [1_000_000.0];
+        var psm2 = new MockSpectralMatch("test.raw", "ACDEF", "ACDEF", 1.0, 2, [pep1Unmod]);
+        psm2.Intensities = [3_000_000.0];
+
+        // Peptide 2: unmodified only (1e6) -> ratio = 0
+        var psm3 = new MockSpectralMatch("test.raw", "CDEFG", "CDEFG", 1.0, 3, [pep2]);
+        psm3.Intensities = [1_000_000.0];
+
+        // Peptide 3: 1 modified (3e6), 1 unmodified (1e6) -> ratio = 0.75
+        var psm4 = new MockSpectralMatch("test.raw", "B[Phosphorylation]CDEF", "BCDEF", 1.0, 4, [pep3Mod]);
+        psm4.Intensities = [3_000_000.0];
+        var psm5 = new MockSpectralMatch("test.raw", "BCDEF", "BCDEF", 1.0, 5, [pep3Unmod]);
+        psm5.Intensities = [1_000_000.0];
+
+        var result = ModificationOccupancyCalculator.CalculateParentLevelOccupancyByPeptide(
+            protein, [psm1, psm2, psm3, psm4, psm5], IntensityRollupStrategy.Median);
+
+        var site = result[4][0];
+        // Per-peptide ratios: 0.25, 0, 0.75 -> sorted: 0, 0.25, 0.75 -> median = 0.25
+        Assert.That(site.IntensityBasedStoichiometry, Is.EqualTo(0.25).Within(1e-10));
+        Assert.That(site.IntensityBasedStoichiometry, Is.LessThanOrEqualTo(1.0));
+        Assert.That(site.IntensityBasedStoichiometry, Is.GreaterThanOrEqualTo(0.0));
+    }
+
+    [Test]
+    public void ParentLevelByPeptide_PeptideCountCorrect()
+    {
+        var protein = new MockBioPolymer("ACDEFGHIK", "P00001");
+        ModificationMotif.TryGetMotif("D", out var motif);
+        var mod = new Modification("Phosphorylation", null, "Biological", null, motif, "Anywhere.", null, 79.966);
+
+        var mods1 = new Dictionary<int, Modification> { { 4, mod } };
+        var peptide1 = new MockBioPolymerWithSetMods("ACDEF", "ACD[Phosphorylation]EF", protein, 1, 5, mods1);
+        var peptide2 = new MockBioPolymerWithSetMods("CDEFG", "CDEFG", protein, 2, 6);
+
+        var psm1 = new MockSpectralMatch("test.raw", "ACD[Phosphorylation]EF", "ACDEF", 1.0, 1, [peptide1]);
+        psm1.Intensities = [1_000_000.0];
+        var psm2 = new MockSpectralMatch("test.raw", "CDEFG", "CDEFG", 1.0, 2, [peptide2]);
+        psm2.Intensities = [1_000_000.0];
+
+        var result = ModificationOccupancyCalculator.CalculateParentLevelOccupancyByPeptide(
+            protein, [psm1, psm2], IntensityRollupStrategy.Mean);
+
+        var site = result[4][0];
+        Assert.That(site.PeptideCount, Is.EqualTo(2));
+    }
+
+    [Test]
+    public void ParentLevelByPeptide_ModifiedPeptideCountCorrect()
+    {
+        var protein = new MockBioPolymer("ACDEFGHIK", "P00001");
+        ModificationMotif.TryGetMotif("D", out var motif);
+        var mod = new Modification("Phosphorylation", null, "Biological", null, motif, "Anywhere.", null, 79.966);
+
+        var mods1 = new Dictionary<int, Modification> { { 4, mod } };
+        var peptide1 = new MockBioPolymerWithSetMods("ACDEF", "ACD[Phosphorylation]EF", protein, 1, 5, mods1);
+        var peptide2 = new MockBioPolymerWithSetMods("CDEFG", "CDEFG", protein, 2, 6);
+        var peptide3 = new MockBioPolymerWithSetMods("ACDEF", "ACD[Phosphorylation]EF", protein, 1, 5, mods1);
+
+        var psm1 = new MockSpectralMatch("test.raw", "ACD[Phosphorylation]EF", "ACDEF", 1.0, 1, [peptide1]);
+        psm1.Intensities = [1_000_000.0];
+        var psm2 = new MockSpectralMatch("test.raw", "CDEFG", "CDEFG", 1.0, 2, [peptide2]);
+        psm2.Intensities = [1_000_000.0];
+        var psm3 = new MockSpectralMatch("test.raw", "ACD[Phosphorylation]EF", "ACDEF", 1.0, 3, [peptide3]);
+        psm3.Intensities = [2_000_000.0];
+
+        var result = ModificationOccupancyCalculator.CalculateParentLevelOccupancyByPeptide(
+            protein, [psm1, psm2, psm3], IntensityRollupStrategy.Mean);
+
+        var site = result[4][0];
+        // Two distinct peptides have the modification (ACDEF from psm1 and psm3 are same peptide)
+        Assert.That(site.ModifiedPeptideCount, Is.EqualTo(1));
+    }
+
+    [Test]
+    public void ParentLevelByPeptide_SumStrategyThrowsArgumentOutOfRange()
+    {
+        var protein = new MockBioPolymer("ACDEFGHIK", "P00001");
+        var psm = new MockSpectralMatch("test.raw", "ACDEF", "ACDEF", 1.0, 1);
+
+        Assert.That(
+            () => ModificationOccupancyCalculator.CalculateParentLevelOccupancyByPeptide(
+                protein, [psm], IntensityRollupStrategy.Sum),
+            Throws.InstanceOf<ArgumentOutOfRangeException>());
+    }
+
+    [Test]
+    public void ParentLevelByPeptide_SinglePeptide_EqualsSumStrategy()
+    {
+        var protein = new MockBioPolymer("ACDEFGHIK", "P00001");
+        ModificationMotif.TryGetMotif("D", out var motif);
+        var mod = new Modification("Phosphorylation", null, "Biological", null, motif, "Anywhere.", null, 79.966);
+
+        var mods = new Dictionary<int, Modification> { { 4, mod } };
+        var modifiedPeptide = new MockBioPolymerWithSetMods("ACDEF", "ACD[Phosphorylation]EF", protein, 1, 5, mods);
+        var unmodifiedPeptide = new MockBioPolymerWithSetMods("ACDEF", "ACDEF", protein, 1, 5);
+
+        var psm1 = new MockSpectralMatch("test.raw", "ACD[Phosphorylation]EF", "ACDEF", 1.0, 1, [modifiedPeptide]);
+        psm1.Intensities = [1_000_000.0];
+        var psm2 = new MockSpectralMatch("test.raw", "ACDEF", "ACDEF", 1.0, 2, [unmodifiedPeptide]);
+        psm2.Intensities = [3_000_000.0];
+
+        var resultMean = ModificationOccupancyCalculator.CalculateParentLevelOccupancyByPeptide(
+            protein, [psm1, psm2], IntensityRollupStrategy.Mean);
+        var resultMedian = ModificationOccupancyCalculator.CalculateParentLevelOccupancyByPeptide(
+            protein, [psm1, psm2], IntensityRollupStrategy.Median);
+        var resultSum = ModificationOccupancyCalculator.CalculateParentLevelOccupancy(
+            protein, [psm1, psm2], IntensityRollupStrategy.Sum);
+
+        // With only one peptide, Mean/Median/Sum should all give the same per-peptide ratio
+        Assert.That(resultMean[4][0].IntensityBasedStoichiometry, Is.EqualTo(0.25).Within(1e-10));
+        Assert.That(resultMedian[4][0].IntensityBasedStoichiometry, Is.EqualTo(0.25).Within(1e-10));
+        Assert.That(resultSum[4][0].IntensityBasedStoichiometry, Is.EqualTo(0.25).Within(1e-10));
+    }
+
+    [Test]
+    public void ParentLevelByPeptide_EmptyInput_ReturnsEmpty()
+    {
+        var protein = new MockBioPolymer("ACDEFGHIK", "P00001");
+
+        var result = ModificationOccupancyCalculator.CalculateParentLevelOccupancyByPeptide(
+            protein, Array.Empty<ISpectralMatch>(), IntensityRollupStrategy.Mean);
+
+        Assert.That(result, Is.Empty);
+    }
+
+    [Test]
+    public void ParentLevelByPeptide_AllUnmodified_ReturnsEmpty()
+    {
+        var protein = new MockBioPolymer("ACDEFGHIK", "P00001");
+        var peptide = new MockBioPolymerWithSetMods("ACDEF", "ACDEF", protein, 1, 5);
+
+        var psm = new MockSpectralMatch("test.raw", "ACDEF", "ACDEF", 1.0, 1, [peptide]);
+        psm.Intensities = [1_000_000.0];
+
+        var result = ModificationOccupancyCalculator.CalculateParentLevelOccupancyByPeptide(
+            protein, [psm], IntensityRollupStrategy.Mean);
+
+        // No modifications observed, so no occupancy entries to return
+        Assert.That(result, Is.Empty);
+    }
+
+    [Test]
+    public void ParentLevelByPeptide_UnmodifiedPeptidesIncludedAsZero()
+    {
+        var protein = new MockBioPolymer("ACDEFGHIK", "P00001");
+        ModificationMotif.TryGetMotif("D", out var motif);
+        var mod = new Modification("Phosphorylation", null, "Biological", null, motif, "Anywhere.", null, 79.966);
+
+        var mods = new Dictionary<int, Modification> { { 4, mod } };
+        var modifiedPeptide = new MockBioPolymerWithSetMods("ACDEF", "ACD[Phosphorylation]EF", protein, 1, 5, mods);
+        var unmodifiedPeptideA = new MockBioPolymerWithSetMods("ACDEF", "ACDEF", protein, 1, 5);
+        var unmodifiedPeptideB = new MockBioPolymerWithSetMods("CDEFG", "CDEFG", protein, 2, 6);
+
+        // Modified peptide: 1 modified PSM
+        var psm1 = new MockSpectralMatch("test.raw", "ACD[Phosphorylation]EF", "ACDEF", 1.0, 1, [modifiedPeptide]);
+        psm1.Intensities = [1_000_000.0];
+
+        // Unmodified peptide A: 1 unmodified PSM (same sequence as modified)
+        var psm2 = new MockSpectralMatch("test.raw", "ACDEF", "ACDEF", 1.0, 2, [unmodifiedPeptideA]);
+        psm2.Intensities = [3_000_000.0];
+
+        // Unmodified peptide B: 1 unmodified PSM (different sequence, covers position 4)
+        var psm3 = new MockSpectralMatch("test.raw", "CDEFG", "CDEFG", 1.0, 3, [unmodifiedPeptideB]);
+        psm3.Intensities = [1_000_000.0];
+
+        var result = ModificationOccupancyCalculator.CalculateParentLevelOccupancyByPeptide(
+            protein, [psm1, psm2, psm3], IntensityRollupStrategy.Mean);
+
+        var site = result[4][0];
+        // Per-peptide ratios:
+        //   ACDEF group (psm1 + psm2, same peptide): 1e6 / (1e6 + 3e6) = 0.25
+        //   CDEFG group (psm3, different peptide, unmodified): 0.0
+        // Mean = (0.25 + 0.0) / 2 = 0.125
+        Assert.That(site.IntensityBasedStoichiometry, Is.EqualTo(0.125).Within(1e-10));
+        Assert.That(site.PeptideCount, Is.EqualTo(2));
+        Assert.That(site.ModifiedPeptideCount, Is.EqualTo(1));
     }
 
     #endregion

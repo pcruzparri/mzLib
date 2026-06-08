@@ -16,5 +16,6 @@ public enum BioPolymerGroupType
     /// DigestionProduct (Peptide/Oligo) group — occupancy is calculated in product-local positions
     /// using <see cref="ModificationOccupancyCalculator.CalculateDigestionProductLevelOccupancy"/>.
     /// </summary>
+    [Obsolete("Use PeptideGroup instead of BioPolymerGroup with GroupType.DigestionProduct.")]
     DigestionProduct
 }

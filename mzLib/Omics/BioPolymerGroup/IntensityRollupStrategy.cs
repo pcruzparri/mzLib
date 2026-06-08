@@ -13,20 +13,18 @@ public enum IntensityRollupStrategy
     Sum,
 
     /// <summary>
-    /// Arithmetic mean of PSM intensities. Reduces influence of high-abundance outlier PSMs.
-    /// Stoichiometry = Mean(modified PSM intensities) / Mean(all PSM intensities covering the site).
-    /// Note: The mean ratio can exceed 1.0 when the mean modified intensity is greater
-    /// than the mean total intensity (e.g., when modified PSMs are systematically higher
-    /// intensity than unmodified PSMs).
+    /// Arithmetic mean of per-peptide occupancy ratios. For each peptide covering a site,
+    /// occupancy is computed as Sum(modified PSM intensities) / Sum(all PSM intensities),
+    /// then the mean of those per-peptide ratios is taken. This produces bounded [0, 1]
+    /// stoichiometry values that are not susceptible to the ratio-of-aggregates bias.
     /// </summary>
     Mean,
 
     /// <summary>
-    /// Median of PSM intensities. Robust against outlier intensity values.
-    /// Stoichiometry = Median(modified PSM intensities) / Median(all PSM intensities covering the site).
-    /// Note: The median ratio can exceed 1.0 when the median modified intensity is greater
-    /// than the median total intensity (e.g., when modified PSMs are systematically higher
-    /// intensity than unmodified PSMs).
+    /// Median of per-peptide occupancy ratios. For each peptide covering a site,
+    /// occupancy is computed as Sum(modified PSM intensities) / Sum(all PSM intensities),
+    /// then the median of those per-peptide ratios is taken. This produces bounded [0, 1]
+    /// stoichiometry values that are robust against outlier peptides.
     /// </summary>
     Median
 }

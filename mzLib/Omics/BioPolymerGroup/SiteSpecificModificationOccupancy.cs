@@ -27,8 +27,32 @@ public class SiteSpecificModificationOccupancy
     /// <summary>Sum (or rolled-up value, depending on strategy) of intensities for all peptides covering this position.</summary>
     public double TotalIntensity { get; set; }
 
-    /// <summary>Intensity-based stoichiometry fraction (ModifiedIntensity / TotalIntensity).</summary>
-    public double IntensityBasedStoichiometry => TotalIntensity > 0 ? ModifiedIntensity / TotalIntensity : 0;
+    private double _intensityBasedStoichiometry = double.NaN;
+
+    /// <summary>
+    /// Intensity-based stoichiometry fraction. When not explicitly set, computed as
+    /// <see cref="ModifiedIntensity"/> / <see cref="TotalIntensity"/>. When set directly
+    /// (e.g., by per-peptide aggregation strategies), returns the stored value.
+    /// </summary>
+    public double IntensityBasedStoichiometry
+    {
+        get => double.IsNaN(_intensityBasedStoichiometry)
+            ? (TotalIntensity > 0 ? ModifiedIntensity / TotalIntensity : 0)
+            : _intensityBasedStoichiometry;
+        set => _intensityBasedStoichiometry = value;
+    }
+
+    /// <summary>
+    /// Number of distinct peptides covering this position.
+    /// Set when using per-peptide aggregation strategies (e.g., Mean/Median).
+    /// </summary>
+    public int PeptideCount { get; set; }
+
+    /// <summary>
+    /// Number of distinct peptides carrying this modification at this position.
+    /// Set when using per-peptide aggregation strategies (e.g., Mean/Median).
+    /// </summary>
+    public int ModifiedPeptideCount { get; set; }
 
     public SiteSpecificModificationOccupancy(int oneBasedPosition, string modIdWithMotif)
     {
@@ -44,17 +68,28 @@ public class SiteSpecificModificationOccupancy
     /// </summary>
     public string ToModInfoString(bool intensityBased = false)
     {
+        string positionStr = $"pos{OneIsNTerminusPositionInBioPolymer - 1}";
         if (intensityBased)
         {
             string occupancy = IntensityBasedStoichiometry.ToString("F4");
-            string fractional = $"{ModifiedIntensity:G4}/{TotalIntensity:G4}";
-            return $"pos{OneIsNTerminusPositionInBioPolymer - 1}[{ModificationIdWithMotif},info:fraction={occupancy}({fractional})]";
+            string fractional;
+            if (!double.IsNaN(_intensityBasedStoichiometry))
+            {
+                // Aggregated stoichiometry (e.g., per-peptide Mean/Median) — show peptide counts.
+                fractional = $"{ModifiedPeptideCount}/{PeptideCount} peptides";
+            }
+            else
+            {
+                // Default computed stoichiometry — show raw intensities.
+                fractional = $"{ModifiedIntensity:G4}/{TotalIntensity:G4}";
+            }
+            return $"{positionStr}[{ModificationIdWithMotif},info:fraction={occupancy}({fractional})]";
         }
         else
         {
             string occupancy = CountBasedOccupancy.ToString("F2");
             string fractional = $"{ModifiedCount}/{TotalCount}";
-            return $"pos{OneIsNTerminusPositionInBioPolymer - 1}[{ModificationIdWithMotif},info:fraction={occupancy}({fractional})]";
+            return $"{positionStr}[{ModificationIdWithMotif},info:fraction={occupancy}({fractional})]";
         }
     }
 }

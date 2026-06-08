@@ -68,7 +68,9 @@ namespace Omics.BioPolymerGroup
             IsDecoy = false;
             IsContaminant = false;
             IsEntrapment = false;
+#pragma warning disable CS0618
             GroupType = groupType;
+#pragma warning restore CS0618
 
             // if any of the biopolymers in the group are decoys, the group is a decoy
             foreach (var bioPolymer in bioPolymers)
@@ -260,6 +262,7 @@ namespace Omics.BioPolymerGroup
         /// <see cref="BioPolymerGroupType.Parent"/> uses protein-level coordinates;
         /// <see cref="BioPolymerGroupType.DigestionProduct"/> use digestion-product-local coordinates.
         /// </summary>
+        [Obsolete("GroupType is no longer needed. Parent-level occupancy is the default. Use PeptideGroup for peptide-level occupancy.")]
         public BioPolymerGroupType GroupType { get; }
 
         /// <summary>
@@ -435,7 +438,10 @@ namespace Omics.BioPolymerGroup
             // Output per-group quantification and occupancy
             if (SampleGroupResults is null) PopulateSampleGroupResults();
 
+            // Suppress obsolete warning for internal backward-compatible usage.
+#pragma warning disable CS0618
             bool isParentLevel = GroupType == BioPolymerGroupType.Parent;
+#pragma warning restore CS0618
 
             List<string> orderedKeys = (isParentLevel
                 ? ListOfBioPolymersOrderedByAccession.Select(p => p.Accession)
@@ -545,129 +551,11 @@ namespace Omics.BioPolymerGroup
         /// </remarks>
         public void PopulateSampleGroupResults()
         {
-            var results = new List<SampleGroupResult>();
-
-            var spectraFiles = SamplesForQuantification?.OfType<SpectraFileInfo>().ToList() ?? [];
-            var isobaricSamples = SamplesForQuantification?.OfType<IsobaricQuantSampleInfo>().ToList() ?? [];
-
-            if (spectraFiles.Count > 0)
-            {
-                bool unfractionated = spectraFiles.Select(p => p.Fraction).Distinct().Count() == 1;
-                bool conditionsUndefined = spectraFiles.All(p => string.IsNullOrEmpty(p.Condition));
-                bool silacExperimentalDesign = spectraFiles.Any(p => !File.Exists(p.FullFilePathWithExtension));
-
-                foreach (var conditionGroup in spectraFiles.GroupBy(p => p.Condition))
-                {
-                    foreach (var bioRepGroup in conditionGroup.GroupBy(p => p.BiologicalReplicate).OrderBy(p => p.Key))
-                    {
-                        var filesInGroup = bioRepGroup.ToList();
-                        string label = (conditionsUndefined && unfractionated) || silacExperimentalDesign
-                            ? filesInGroup.First().FilenameWithoutExtension
-                            : $"{conditionGroup.Key}_{bioRepGroup.Key + 1}";
-
-                        var filePaths = new HashSet<string>(filesInGroup.Select(f => f.FullFilePathWithExtension));
-                        var psmsInGroup = AllPsmsBelowOnePercentFDR
-                            .Where(p => filePaths.Contains(p.FullFilePath))
-                            .ToList();
-
-                        // Create SampleGroupResult with per-sample intensities if available.
-                        // Otherwise, create with empty intensities (HasIntensityData = false) for spectral counting.
-                        var intensitiesBySample = new Dictionary<string, double>();
-                        SampleGroupResult result;
-                        if (IntensitiesBySample != null)
-                        {
-                            foreach (var file in filesInGroup)
-                            {
-                                if (IntensitiesBySample.TryGetValue(file, out var fileIntensity))
-                                    intensitiesBySample[file.FilenameWithoutExtension] = fileIntensity;
-                            }
-
-                            result = new SampleGroupResult(conditionGroup.Key, bioRepGroup.Key)
-                            {
-                                Label = label,
-                                SpectralCount = psmsInGroup.Count,
-                                FilesInGroup = filesInGroup.ToDictionary(kvp => kvp.FilenameWithoutExtension, kvp => (ISampleInfo)kvp),
-                                IntensitiesBySample = intensitiesBySample
-                            };
-                        }
-                        else 
-                        {
-                            result = new SampleGroupResult(conditionGroup.Key, bioRepGroup.Key)
-                            {
-                                Label = label,
-                                SpectralCount = psmsInGroup.Count,
-                                FilesInGroup = filesInGroup.ToDictionary(kvp => kvp.FilenameWithoutExtension, kvp => (ISampleInfo)kvp)
-                                // IntensitiesBySample left empty → HasIntensityData = false
-                            };
-                        }
-
-                        PopulateOccupancy(result, psmsInGroup);
-                        results.Add(result);
-                    }
-                }
-            }
-            else if (isobaricSamples.Count > 0)
-            {
-                foreach (var fileGroup in isobaricSamples.GroupBy(p => p.FullFilePathWithExtension).OrderBy(g => g.Key))
-                {
-                    var psmsInFile = AllPsmsBelowOnePercentFDR
-                        .Where(p => p.FullFilePath.Equals(fileGroup.Key))
-                        .ToList();
-
-                    foreach (var sample in fileGroup.OrderBy(p => p.ChannelLabel))
-                    {
-                        string label = $"{Path.GetFileNameWithoutExtension(sample.FullFilePathWithExtension)}_{sample.ChannelLabel}";
-
-                        // Build per-channel intensity lookup for this result
-                        SampleGroupResult result;
-                        if (IntensitiesBySample != null && IntensitiesBySample.TryGetValue(sample, out var channelIntensity))
-                        {
-
-                            result = new SampleGroupResult(sample.Condition, sample.BiologicalReplicate)
-                            {
-                                Label = label,
-                                SpectralCount = psmsInFile.Count,
-                                FilesInGroup = new Dictionary<string, ISampleInfo> { { label, sample } },
-                                IntensitiesBySample = new Dictionary<string, double> { { label, channelIntensity } }
-                            };
-                        }
-                        else
-                        {
-                            result = new SampleGroupResult(sample.Condition, sample.BiologicalReplicate)
-                            {
-                                Label = label,
-                                SpectralCount = psmsInFile.Count,
-                                FilesInGroup = new Dictionary<string, ISampleInfo> { { label, sample } }
-                                // IntensitiesBySample left empty → HasIntensityData = false
-                            };
-                        }
-
-                        PopulateOccupancy(result, psmsInFile);
-                        results.Add(result);
-                    }
-                }
-            }
-            else
-            {
-                // No experimental design — group PSMs by source file for count-only results
-                foreach (var fileGroup in AllPsmsBelowOnePercentFDR.GroupBy(p => p.FullFilePath).OrderBy(g => g.Key))
-                {
-                    var psmsInFile = fileGroup.ToList();
-                    string label = Path.GetFileNameWithoutExtension(fileGroup.Key);
-
-                    var result = new SampleGroupResult(string.Empty, 0)
-                    {
-                        Label = label,
-                        SpectralCount = psmsInFile.Count
-                        // FilesInGroup and IntensitiesByFile left empty → HasIntensityData = false
-                    };
-
-                    PopulateOccupancy(result, psmsInFile);
-                    results.Add(result);
-                }
-            }
-
-            SampleGroupResults = results;
+            SampleGroupResults = SampleGroupingHelper.BuildSampleGroupResults(
+                AllPsmsBelowOnePercentFDR,
+                SamplesForQuantification,
+                IntensitiesBySample,
+                PopulateOccupancy);
         }
 
         /// <summary>
@@ -677,12 +565,26 @@ namespace Omics.BioPolymerGroup
         /// </summary>
         private void PopulateOccupancy(SampleGroupResult result, List<ISpectralMatch> psms)
         {
+            // Suppress obsolete warnings for internal backward-compatible usage.
+            // GroupType and DigestionProductOccupancy are deprecated but still supported
+            // during the transition period.
+#pragma warning disable CS0618
             if (GroupType == BioPolymerGroupType.Parent)
             {
+#pragma warning restore CS0618
                 foreach (var bioPolymer in ListOfBioPolymersOrderedByAccession)
                 {
-                    var occupancy = ModificationOccupancyCalculator.CalculateParentLevelOccupancy(
-                        bioPolymer, psms, OccupancyRollupStrategy);
+                    Dictionary<int, List<SiteSpecificModificationOccupancy>> occupancy;
+                    if (OccupancyRollupStrategy == IntensityRollupStrategy.Sum)
+                    {
+                        occupancy = ModificationOccupancyCalculator.CalculateParentLevelOccupancy(
+                            bioPolymer, psms, IntensityRollupStrategy.Sum);
+                    }
+                    else
+                    {
+                        occupancy = ModificationOccupancyCalculator.CalculateParentLevelOccupancyByPeptide(
+                            bioPolymer, psms, OccupancyRollupStrategy);
+                    }
 
                     if (occupancy.Count > 0)
                         result.ParentOccupancy[bioPolymer.Accession] = occupancy;
@@ -692,13 +594,15 @@ namespace Omics.BioPolymerGroup
             {
                 var psmsGroupedByBaseSequence = psms.GroupBy(p => p.BaseSequence);
                 foreach (var baseSeqGroup in psmsGroupedByBaseSequence)
-                { 
+                {
                     var occupancy = ModificationOccupancyCalculator.CalculateDigestionProductLevelOccupancy(
                         baseSeqGroup.ToList(), OccupancyRollupStrategy);
 
                     if (occupancy.Count > 0)
                     {
+#pragma warning disable CS0618
                         result.DigestionProductOccupancy[baseSeqGroup.Key] = occupancy;
+#pragma warning restore CS0618
                     }
                 }
             }
@@ -779,11 +683,13 @@ namespace Omics.BioPolymerGroup
                 new HashSet<IBioPolymerWithSetMods>(UniqueBioPolymersWithSetMods.Intersect(allSequencesForThisFile));
 
             // ConstructSubsetBioPolymerGroup passes it through the constructor instead of object initializer
+#pragma warning disable CS0618
             BioPolymerGroup subsetGroup = new BioPolymerGroup(
                 BioPolymers,
                 allSequencesForThisFile,
                 allUniqueSequencesForThisFile,
                 GroupType)
+#pragma warning restore CS0618
             {
                 AllPsmsBelowOnePercentFDR = allPsmsForThisFile,
                 DisplayModsOnPeptides = DisplayModsOnPeptides,
