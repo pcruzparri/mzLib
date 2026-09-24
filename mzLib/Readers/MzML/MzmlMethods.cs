@@ -1,4 +1,4 @@
-using MassSpectrometry;
+﻿using MassSpectrometry;
 using MzLibUtil;
 using System;
 using System.Collections.Generic;
@@ -62,12 +62,49 @@ namespace Readers
             {Polarity.Positive, "positive scan"}
         };
 
+        /// <summary>
+        /// Turns an arbitrary file name into something usable as an mzML id.
+        ///
+        /// run/@id and sourceFile/@id are xs:ID, i.e. NCName, so a name may not start with a digit,
+        /// '.' or '-', and may not contain ':' or a space anywhere. Ordinary instrument file names
+        /// break all of those rules -- dated names such as "12-10-16_yeast_rep1.raw" lead with a
+        /// digit, and spaces and parentheses are routine. Left unsanitised, the resulting mzML is
+        /// rejected by schema-validating consumers such as ProteomeXchange (mzLib issue 259).
+        ///
+        /// Illegal characters become '_' and a leading '_' is prepended when the first character
+        /// cannot start an NCName. Any name made only of ASCII letters, digits, '_', '-' and '.' and
+        /// starting with a letter or '_' is returned unchanged, so ordinary file names keep the ids
+        /// they have always had and only previously-invalid output moves. The unmodified file name
+        /// is still available on sourceFile/@name and sourceFile/@location.
+        /// </summary>
+        private static string ToValidXmlId(string fileName)
+        {
+            if (string.IsNullOrEmpty(fileName))
+            {
+                return "id";
+            }
+
+            var sanitized = new StringBuilder(fileName.Length + 1);
+            foreach (char c in fileName)
+            {
+                // EncodeNmToken escapes exactly the characters that are illegal in an XML Name, and
+                // NCName is Name minus ':'.
+                bool legal = c != ':' && XmlConvert.EncodeNmToken(c.ToString()).Length == 1;
+                sanitized.Append(legal ? c : '_');
+            }
+
+            if (!char.IsLetter(sanitized[0]) && sanitized[0] != '_')
+            {
+                sanitized.Insert(0, '_');
+            }
+
+            return sanitized.ToString();
+        }
+
         public static void CreateAndWriteMyMzmlWithCalibratedSpectra(MsDataFile myMsDataFile, string outputFile, bool writeIndexed)
         {
             string title = Path.GetFileNameWithoutExtension(outputFile);
-            string idTitle = char.IsNumber(title[0]) ?
-                "id:" + title :
-                title;
+            string idTitle = ToValidXmlId(title);
 
             var mzML = new Generated.mzMLType()
             {
@@ -97,10 +134,12 @@ namespace Readers
                 version = "12:10:2011"
             };
 
+            // sourceFileList is left unset unless it can be filled in below: it is minOccurs="0" in
+            // the schema, but requires a count attribute and at least one sourceFile child once
+            // present, so an empty one is invalid.
             mzML.fileDescription = new Generated.FileDescriptionType()
             {
                 fileContent = new Generated.ParamGroupType(),
-                sourceFileList = new Generated.SourceFileListType()
             };
 
             if (myMsDataFile.SourceFile.NativeIdFormat != null && myMsDataFile.SourceFile.MassSpectrometerFileFormat != null && myMsDataFile.SourceFile.FileChecksumType != null)
@@ -111,14 +150,17 @@ namespace Readers
                     sourceFile = new Generated.SourceFileType[1]
                 };
 
-                string idName = char.IsNumber(myMsDataFile.SourceFile.FileName[0]) ?
-                    "id:" + myMsDataFile.SourceFile.FileName[0] :
-                    myMsDataFile.SourceFile.FileName;
+                string idName = ToValidXmlId(myMsDataFile.SourceFile.FileName);
                 mzML.fileDescription.sourceFileList.sourceFile[0] = new Generated.SourceFileType
                 {
                     id = idName,
-                    name = myMsDataFile.SourceFile.FileName,
-                    location = myMsDataFile.SourceFile.Uri.ToString(),
+                    // name and location are both use="required" in the mzML schema, and a null string
+                    // attribute is OMITTED by XmlSerializer rather than written empty -- so either being
+                    // null produced exactly the schema-invalid output this method exists to avoid.
+                    // FileName is null whenever the id-only SourceFile constructor was used; Uri is null
+                    // for that same case and when a path failed to parse.
+                    name = myMsDataFile.SourceFile.FileName ?? SourceFile.UnknownName,
+                    location = myMsDataFile.SourceFile.Uri?.ToString() ?? SourceFile.UnknownLocation,
                 };
 
                 mzML.fileDescription.sourceFileList.sourceFile[0].cvParam = new Generated.CVParamType[3];
@@ -195,11 +237,12 @@ namespace Readers
             // spectrometer produced the data. Reading such a file back reported no instrument at
             // all, and the loss was invisible because MS:1000031 looks like a real declaration.
             var instrumentModel = myMsDataFile.SourceFile.InstrumentModel;
+            var serialNumber = myMsDataFile.SourceFile.InstrumentSerialNumber;
 
             // One configuration is still emitted per mass analyzer present, which is not
             // necessarily how the original file was organised. Recovering the true configuration
-            // list (multiple instruments, sources, detectors, serial numbers) needs SourceFile to
-            // carry more than the model, and is left for later.
+            // list (multiple instruments, sources, detectors) needs SourceFile to carry more than
+            // the model and serial number, and is left for later.
             mzML.instrumentConfigurationList = new Generated.InstrumentConfigurationListType
             {
                 count = analyzersInThisFile.Count.ToString(),
@@ -215,7 +258,7 @@ namespace Readers
                 {
                     id = "IC" + (i + 1).ToString(),
                     componentList = new Generated.ComponentListType(),
-                    cvParam = new Generated.CVParamType[1]
+                    cvParam = new Generated.CVParamType[serialNumber is null ? 1 : 2]
                 };
 
                 // A specific model when we have an ACCESSIONED one, otherwise the bare parent term
@@ -251,6 +294,21 @@ namespace Readers
                             name = "instrument model",
                             value = ""
                         };
+
+                // The serial number beside the model, as ProteoWizard writes it. Unlike a RAW-read
+                // model it needs no lookup -- the accession is fixed and the serial is the value -- so
+                // it survives a write from either source. Its value is what keeps a reader from
+                // mistaking it for the model.
+                if (serialNumber is not null)
+                {
+                    mzML.instrumentConfigurationList.instrumentConfiguration[i].cvParam[1] = new Generated.CVParamType
+                    {
+                        cvRef = "MS",
+                        accession = "MS:1000529",
+                        name = "instrument serial number",
+                        value = serialNumber
+                    };
+                }
 
                 mzML.instrumentConfigurationList.instrumentConfiguration[i].componentList = new Generated.ComponentListType
                 {
@@ -341,6 +399,15 @@ namespace Readers
                 defaultInstrumentConfigurationRef = analyzersInThisFileDict[analyzersInThisFile[0]],
                 id = idTitle
             };
+
+            // startTimeStamp is a non-nullable DateTime in the generated type; the Specified flag is
+            // what emits or omits it. XmlSerializer writes the Kind back as it was read: "Z" for
+            // Utc, no offset for Unspecified (see SourceFile.AcquisitionStartTime).
+            if (myMsDataFile.SourceFile.AcquisitionStartTime is { } acquisitionStartTime)
+            {
+                mzML.run.startTimeStamp = acquisitionStartTime;
+                mzML.run.startTimeStampSpecified = true;
+            }
 
             mzML.run.chromatogramList = new Generated.ChromatogramListType
             {
